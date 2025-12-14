@@ -433,6 +433,7 @@
         let showcaseAngle = 0;
         let showcaseRadius = 8;
         let showcaseCameraHeight = 1.5;
+        let showcaseTargetZ = 1.5; // Z-Position des Frame-Zentrums
         let originalCameraPosition = null;
         let originalControlsEnabled = null;
 
@@ -442,14 +443,75 @@
         let recordedChunks = [];
         let originalRendererSize = { width: 0, height: 0 };
         let originalCameraAspect = 0;
+        let originalPixelRatio = 0;
 
         // Configuration
         const SHOWCASE_ROTATION_SPEED = 0.898; // rad/sec (~7s für 360°)
         const SHOWCASE_DURATION = Math.PI * 2 / SHOWCASE_ROTATION_SPEED;
         const RECORDING_WIDTH = 1080;
         const RECORDING_HEIGHT = 1080;
-        const RECORDING_FPS = 30;
-        const RECORDING_BITRATE = 8000000; // 8 Mbps
+        const RECORDING_FPS = 60; // 60 FPS für maximale Flüssigkeit
+        const RECORDING_BITRATE = 12000000; // 12 Mbps für beste Qualität
+
+        // Easing-Funktion für sanfte Bewegungen
+        function easeInOutCubic(t) {
+            return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+        }
+
+        // Best Practice: BoundingBox-basierte Kamera-Positionierung
+        function calculateOptimalShowcaseSettings(viewportAspectRatio = null) {
+            if (!frameGroup) {
+                return { radius: 10, height: 1.5 }; // Defaults
+            }
+
+            // BESTE METHODE: Verwende die tatsächliche 3D BoundingBox des Frames
+            const boundingBox = new THREE.Box3().setFromObject(frameGroup);
+            const size = boundingBox.getSize(new THREE.Vector3());
+            const center = boundingBox.getCenter(new THREE.Vector3());
+
+            console.log('Frame Size:', {
+                width: size.x.toFixed(3),
+                height: size.y.toFixed(3),
+                depth: size.z.toFixed(3)
+            });
+
+            // Maximale Dimension (wichtig für alle Orientierungen)
+            const maxDimension = Math.max(size.x, size.y, size.z);
+
+            // FOV = 35° (siehe camera setup)
+            const fov = 35 * (Math.PI / 180);
+
+            // Basis-Radius Berechnung mit großzügigem Puffer
+            let optimalRadius = (maxDimension / 2) / Math.tan(fov / 2);
+
+            // Großzügiger Puffer abhängig vom Viewport
+            if (viewportAspectRatio === 1.0) {
+                // Recording Mode (1:1): Noch mehr Abstand!
+                // Berechne Diagonale für worst-case
+                const diagonal = Math.sqrt(size.x * size.x + size.y * size.y);
+                const diagonalRadius = (diagonal / 2) / Math.tan(fov / 2);
+                optimalRadius = Math.max(optimalRadius, diagonalRadius) * 1.8; // 80% extra Puffer
+            } else {
+                // Normaler Showcase Mode
+                optimalRadius *= 1.6; // 60% Puffer
+            }
+
+            // Kamera-Höhe: Exakt auf Frame-Zentrum
+            const optimalHeight = center.y;
+
+            console.log('Calculated Settings:', {
+                radius: optimalRadius.toFixed(2) + 'm',
+                height: optimalHeight.toFixed(2) + 'm',
+                targetZ: center.z.toFixed(2) + 'm',
+                mode: viewportAspectRatio === 1.0 ? 'Recording (1:1)' : 'Showcase'
+            });
+
+            return {
+                radius: Math.max(optimalRadius, 6), // Minimum 6m Distanz
+                height: Math.max(optimalHeight, 0.8), // Minimum 0.8m Höhe
+                targetZ: center.z // Z-Position des Frame-Zentrums
+            };
+        }
 
         function init() {
             scene = new THREE.Scene();
@@ -990,9 +1052,13 @@
             originalControlsEnabled = controls.enabled;
             controls.enabled = false;
 
-            // Radius an Druckgröße anpassen
-            const printSize = parseFloat(document.getElementById('printSize').value);
-            showcaseRadius = 6 + (printSize * 2);
+            // Intelligente Kamera-Positionierung basierend auf Frame-Dimensionen
+            const optimalSettings = calculateOptimalShowcaseSettings();
+            showcaseRadius = optimalSettings.radius;
+            showcaseCameraHeight = optimalSettings.height;
+            showcaseTargetZ = optimalSettings.targetZ;
+
+            console.log(`Showcase Settings - Radius: ${showcaseRadius.toFixed(2)}m, Height: ${showcaseCameraHeight.toFixed(2)}m, TargetZ: ${showcaseTargetZ.toFixed(2)}m`);
 
             // UI Update
             document.getElementById('showcaseBtn').textContent = 'SHOWCASE STOPPEN';
@@ -1033,6 +1099,11 @@
                 height: renderer.domElement.height
             };
             originalCameraAspect = camera.aspect;
+            originalPixelRatio = renderer.getPixelRatio();
+
+            // Performance-Optimierungen für flüssige Aufnahme
+            // Pixel Ratio auf 1 setzen für konsistente Performance
+            renderer.setPixelRatio(1);
 
             // Zu 1:1 Aspect Ratio wechseln
             renderer.setSize(RECORDING_WIDTH, RECORDING_HEIGHT);
@@ -1044,16 +1115,38 @@
                 startShowcase();
             }
 
+            // Kamera-Position für quadratischen Viewport optimieren
+            const recordingSettings = calculateOptimalShowcaseSettings(1.0);
+            showcaseRadius = recordingSettings.radius;
+            showcaseCameraHeight = recordingSettings.height;
+            showcaseTargetZ = recordingSettings.targetZ;
+
+            console.log(`Recording Mode - Optimized Radius: ${showcaseRadius.toFixed(2)}m, Height: ${showcaseCameraHeight.toFixed(2)}m, TargetZ: ${showcaseTargetZ.toFixed(2)}m`);
+
             // MediaRecorder einrichten
             const stream = renderer.domElement.captureStream(RECORDING_FPS);
 
             let options;
+            let mimeType;
+            let fileExtension;
+
+            // Prüfe beste Codec-Unterstützung
             if (MediaRecorder.isTypeSupported('video/webm; codecs=vp9')) {
                 options = { mimeType: 'video/webm; codecs=vp9', videoBitsPerSecond: RECORDING_BITRATE };
+                mimeType = 'video/webm';
+                fileExtension = 'webm';
             } else if (MediaRecorder.isTypeSupported('video/webm; codecs=vp8')) {
                 options = { mimeType: 'video/webm; codecs=vp8', videoBitsPerSecond: RECORDING_BITRATE };
+                mimeType = 'video/webm';
+                fileExtension = 'webm';
+            } else if (MediaRecorder.isTypeSupported('video/webm; codecs=h264')) {
+                options = { mimeType: 'video/webm; codecs=h264', videoBitsPerSecond: RECORDING_BITRATE };
+                mimeType = 'video/webm';
+                fileExtension = 'webm';
             } else {
                 options = { mimeType: 'video/webm', videoBitsPerSecond: RECORDING_BITRATE };
+                mimeType = 'video/webm';
+                fileExtension = 'webm';
             }
 
             mediaRecorder = new MediaRecorder(stream, options);
@@ -1066,15 +1159,22 @@
             };
 
             mediaRecorder.onstop = () => {
-                const blob = new Blob(recordedChunks, { type: 'video/webm' });
+                const blob = new Blob(recordedChunks, { type: mimeType });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = `fine-art-showcase-${Date.now()}.webm`;
+                a.download = `fine-art-showcase-${Date.now()}.${fileExtension}`;
                 a.click();
                 URL.revokeObjectURL(url);
 
-                alert('Video wurde erfolgreich gespeichert!');
+                // Zeige Konvertierungs-Hinweis für MP4
+                const message = `Video erfolgreich gespeichert als .${fileExtension}!\n\n` +
+                    `Für Instagram (MP4): Konvertieren Sie das Video mit:\n` +
+                    `• CloudConvert.com (kostenlos, online)\n` +
+                    `• HandBrake (kostenlos, Desktop)\n` +
+                    `• ffmpeg: ffmpeg -i input.webm output.mp4`;
+
+                alert(message);
                 recordedChunks = [];
                 mediaRecorder = null;
             };
@@ -1106,7 +1206,8 @@
             mediaRecorder.stop();
             stopShowcase();
 
-            // Original-Größe wiederherstellen
+            // Original-Einstellungen wiederherstellen
+            renderer.setPixelRatio(originalPixelRatio);
             renderer.setSize(originalRendererSize.width, originalRendererSize.height);
             camera.aspect = originalCameraAspect;
             camera.updateProjectionMatrix();
@@ -1148,7 +1249,8 @@
 
             stopShowcase();
 
-            // Original-Größe wiederherstellen
+            // Original-Einstellungen wiederherstellen
+            renderer.setPixelRatio(originalPixelRatio);
             renderer.setSize(originalRendererSize.width, originalRendererSize.height);
             camera.aspect = originalCameraAspect;
             camera.updateProjectionMatrix();
@@ -1206,8 +1308,8 @@
 
                 camera.position.x = Math.sin(showcaseAngle) * showcaseRadius;
                 camera.position.y = showcaseCameraHeight;
-                camera.position.z = Math.cos(showcaseAngle) * showcaseRadius + 1.5;
-                camera.lookAt(0, 0, 1.5);
+                camera.position.z = Math.cos(showcaseAngle) * showcaseRadius + showcaseTargetZ;
+                camera.lookAt(0, 0, showcaseTargetZ);
 
                 // Auto-stop nach einer Rotation (wenn nicht aufgenommen wird)
                 if (!isRecording && elapsed >= SHOWCASE_DURATION) {
