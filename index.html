@@ -243,6 +243,60 @@
             font-weight: 600;
             color: #333;
         }
+
+        /* Recording Indicator */
+        .recording-indicator {
+            position: absolute;
+            top: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(220, 38, 38, 0.95);
+            color: white;
+            padding: 16px 32px;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 14px;
+            z-index: 150;
+            display: none;
+            box-shadow: 0 4px 16px rgba(220, 38, 38, 0.3);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+
+        .recording-indicator::before {
+            content: '●';
+            display: inline-block;
+            margin-right: 10px;
+            animation: blink 1s infinite;
+        }
+
+        @keyframes blink {
+            0%, 50% { opacity: 1; }
+            51%, 100% { opacity: 0; }
+        }
+
+        .recording-progress {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 0%;
+            height: 4px;
+            background: linear-gradient(to right, #dc2626, #ef4444);
+            transition: width 0.1s linear;
+        }
+
+        button.recording {
+            background: #dc2626 !important;
+            animation: pulse 2s infinite;
+        }
+
+        button.showcase-active {
+            background: #dc2626 !important;
+        }
     </style>
 </head>
 <body>
@@ -318,6 +372,12 @@
                 </select>
             </div>
 
+            <div class="control-group">
+                <label>Showcase & Video</label>
+                <button id="showcaseBtn" disabled>SHOWCASE STARTEN</button>
+                <button id="recordBtn" disabled>VIDEO AUFNEHMEN (1:1)</button>
+            </div>
+
             <button id="exportBtn" disabled>3D Modell exportieren</button>
 
             <div class="specs">
@@ -343,6 +403,11 @@
             Mausrad: Zoomen
         </div>
 
+        <div id="recordingIndicator" class="recording-indicator">
+            AUFNAHME LÄUFT
+            <div class="recording-progress" id="recordingProgress"></div>
+        </div>
+
         <div id="emptyState" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; color: #666; font-size: 16px; pointer-events: none;">
             <div style="font-size: 64px; margin-bottom: 20px; opacity: 0.3;">🖼️</div>
             <div style="font-weight: 600; margin-bottom: 10px;">Kein Bild geladen</div>
@@ -361,6 +426,30 @@
         let frameGroup = null;
         let currentTexture = null;
         let galleryWall = null;
+
+        // Showcase Mode State
+        let isShowcaseMode = false;
+        let showcaseStartTime = 0;
+        let showcaseAngle = 0;
+        let showcaseRadius = 8;
+        let showcaseCameraHeight = 1.5;
+        let originalCameraPosition = null;
+        let originalControlsEnabled = null;
+
+        // Recording State
+        let isRecording = false;
+        let mediaRecorder = null;
+        let recordedChunks = [];
+        let originalRendererSize = { width: 0, height: 0 };
+        let originalCameraAspect = 0;
+
+        // Configuration
+        const SHOWCASE_ROTATION_SPEED = 0.898; // rad/sec (~7s für 360°)
+        const SHOWCASE_DURATION = Math.PI * 2 / SHOWCASE_ROTATION_SPEED;
+        const RECORDING_WIDTH = 1080;
+        const RECORDING_HEIGHT = 1080;
+        const RECORDING_FPS = 30;
+        const RECORDING_BITRATE = 8000000; // 8 Mbps
 
         function init() {
             scene = new THREE.Scene();
@@ -452,6 +541,8 @@
             document.getElementById('frameMaterial').addEventListener('input', updateFrame);
             document.getElementById('glassEffect').addEventListener('input', updateFrame);
             document.getElementById('exportBtn').addEventListener('click', exportModel);
+            document.getElementById('showcaseBtn').addEventListener('click', toggleShowcase);
+            document.getElementById('recordBtn').addEventListener('click', toggleRecording);
 
             // Update range slider backgrounds
             updateSliderBackground('frameWidth');
@@ -877,10 +968,205 @@
             scene.add(frameGroup);
 
             document.getElementById('exportBtn').disabled = false;
+            document.getElementById('showcaseBtn').disabled = false;
+            document.getElementById('recordBtn').disabled = false;
         }
 
         function updateFrame() {
             if (currentTexture) createFramedPrint();
+        }
+
+        function startShowcase() {
+            if (!frameGroup) {
+                alert('Bitte laden Sie zuerst ein Bild hoch');
+                return;
+            }
+
+            isShowcaseMode = true;
+            showcaseStartTime = Date.now();
+            showcaseAngle = 0;
+
+            originalCameraPosition = camera.position.clone();
+            originalControlsEnabled = controls.enabled;
+            controls.enabled = false;
+
+            // Radius an Druckgröße anpassen
+            const printSize = parseFloat(document.getElementById('printSize').value);
+            showcaseRadius = 6 + (printSize * 2);
+
+            // UI Update
+            document.getElementById('showcaseBtn').textContent = 'SHOWCASE STOPPEN';
+            document.getElementById('showcaseBtn').classList.add('showcase-active');
+        }
+
+        function stopShowcase() {
+            isShowcaseMode = false;
+
+            if (originalCameraPosition) {
+                camera.position.copy(originalCameraPosition);
+            }
+            controls.enabled = originalControlsEnabled !== null ? originalControlsEnabled : true;
+
+            document.getElementById('showcaseBtn').textContent = 'SHOWCASE STARTEN';
+            document.getElementById('showcaseBtn').classList.remove('showcase-active');
+        }
+
+        function toggleShowcase() {
+            isShowcaseMode ? stopShowcase() : startShowcase();
+        }
+
+        function startRecording() {
+            if (!frameGroup) {
+                alert('Bitte laden Sie zuerst ein Bild hoch');
+                return;
+            }
+
+            // Browser-Kompatibilität prüfen
+            if (!HTMLCanvasElement.prototype.captureStream) {
+                alert('Ihr Browser unterstützt keine Videoaufnahme. Bitte verwenden Sie Chrome, Firefox oder Edge.');
+                return;
+            }
+
+            // Original-Einstellungen speichern
+            originalRendererSize = {
+                width: renderer.domElement.width,
+                height: renderer.domElement.height
+            };
+            originalCameraAspect = camera.aspect;
+
+            // Zu 1:1 Aspect Ratio wechseln
+            renderer.setSize(RECORDING_WIDTH, RECORDING_HEIGHT);
+            camera.aspect = 1.0;
+            camera.updateProjectionMatrix();
+
+            // Showcase starten
+            if (!isShowcaseMode) {
+                startShowcase();
+            }
+
+            // MediaRecorder einrichten
+            const stream = renderer.domElement.captureStream(RECORDING_FPS);
+
+            let options;
+            if (MediaRecorder.isTypeSupported('video/webm; codecs=vp9')) {
+                options = { mimeType: 'video/webm; codecs=vp9', videoBitsPerSecond: RECORDING_BITRATE };
+            } else if (MediaRecorder.isTypeSupported('video/webm; codecs=vp8')) {
+                options = { mimeType: 'video/webm; codecs=vp8', videoBitsPerSecond: RECORDING_BITRATE };
+            } else {
+                options = { mimeType: 'video/webm', videoBitsPerSecond: RECORDING_BITRATE };
+            }
+
+            mediaRecorder = new MediaRecorder(stream, options);
+            recordedChunks = [];
+
+            mediaRecorder.ondataavailable = (event) => {
+                if (event.data.size > 0) {
+                    recordedChunks.push(event.data);
+                }
+            };
+
+            mediaRecorder.onstop = () => {
+                const blob = new Blob(recordedChunks, { type: 'video/webm' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `fine-art-showcase-${Date.now()}.webm`;
+                a.click();
+                URL.revokeObjectURL(url);
+
+                alert('Video wurde erfolgreich gespeichert!');
+                recordedChunks = [];
+                mediaRecorder = null;
+            };
+
+            mediaRecorder.start();
+            isRecording = true;
+
+            // UI Updates
+            document.getElementById('recordingIndicator').style.display = 'block';
+            document.getElementById('recordBtn').textContent = 'AUFNAHME ABBRECHEN';
+            document.getElementById('recordBtn').classList.add('recording');
+            document.getElementById('controls').style.display = 'none';
+            document.getElementById('info').style.display = 'none';
+
+            updateRecordingProgress();
+
+            // Auto-stop nach einer Rotation
+            setTimeout(() => {
+                if (isRecording) {
+                    stopRecording();
+                }
+            }, SHOWCASE_DURATION * 1000 + 500);
+        }
+
+        function stopRecording() {
+            if (!isRecording || !mediaRecorder) return;
+
+            isRecording = false;
+            mediaRecorder.stop();
+            stopShowcase();
+
+            // Original-Größe wiederherstellen
+            renderer.setSize(originalRendererSize.width, originalRendererSize.height);
+            camera.aspect = originalCameraAspect;
+            camera.updateProjectionMatrix();
+
+            // UI wiederherstellen
+            document.getElementById('controls').style.display = 'block';
+            document.getElementById('info').style.display = 'block';
+            document.getElementById('recordingIndicator').style.display = 'none';
+            document.getElementById('recordBtn').textContent = 'VIDEO AUFNEHMEN (1:1)';
+            document.getElementById('recordBtn').classList.remove('recording');
+        }
+
+        function updateRecordingProgress() {
+            if (!isRecording) {
+                document.getElementById('recordingProgress').style.width = '0%';
+                return;
+            }
+
+            const elapsed = (Date.now() - showcaseStartTime) / 1000;
+            const progress = Math.min((elapsed / SHOWCASE_DURATION) * 100, 100);
+            document.getElementById('recordingProgress').style.width = `${progress}%`;
+
+            requestAnimationFrame(updateRecordingProgress);
+        }
+
+        function cancelRecording() {
+            if (!isRecording || !mediaRecorder) return;
+
+            // Aufnahme abbrechen ohne Video zu speichern
+            isRecording = false;
+
+            // MediaRecorder stoppen ohne onstop-Handler (verhindert Download)
+            const tempRecorder = mediaRecorder;
+            tempRecorder.onstop = null; // Entfernt den Download-Handler
+            tempRecorder.stop();
+
+            mediaRecorder = null;
+            recordedChunks = [];
+
+            stopShowcase();
+
+            // Original-Größe wiederherstellen
+            renderer.setSize(originalRendererSize.width, originalRendererSize.height);
+            camera.aspect = originalCameraAspect;
+            camera.updateProjectionMatrix();
+
+            // UI wiederherstellen
+            document.getElementById('controls').style.display = 'block';
+            document.getElementById('info').style.display = 'block';
+            document.getElementById('recordingIndicator').style.display = 'none';
+            document.getElementById('recordBtn').textContent = 'VIDEO AUFNEHMEN (1:1)';
+            document.getElementById('recordBtn').classList.remove('recording');
+        }
+
+        function toggleRecording() {
+            if (isRecording) {
+                cancelRecording();
+            } else {
+                startRecording();
+            }
         }
 
         function exportModel() {
@@ -912,7 +1198,25 @@
 
         function animate() {
             requestAnimationFrame(animate);
-            controls.update();
+
+            if (isShowcaseMode) {
+                // Kreisförmige Kamera-Bewegung
+                const elapsed = (Date.now() - showcaseStartTime) / 1000;
+                showcaseAngle = elapsed * SHOWCASE_ROTATION_SPEED;
+
+                camera.position.x = Math.sin(showcaseAngle) * showcaseRadius;
+                camera.position.y = showcaseCameraHeight;
+                camera.position.z = Math.cos(showcaseAngle) * showcaseRadius + 1.5;
+                camera.lookAt(0, 0, 1.5);
+
+                // Auto-stop nach einer Rotation (wenn nicht aufgenommen wird)
+                if (!isRecording && elapsed >= SHOWCASE_DURATION) {
+                    stopShowcase();
+                }
+            } else {
+                controls.update();
+            }
+
             renderer.render(scene, camera);
         }
 
