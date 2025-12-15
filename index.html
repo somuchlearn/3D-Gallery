@@ -623,18 +623,15 @@
             });
 
             try {
-                console.log('Lade FFmpeg Core Dateien lokal aus public/...');
+                console.log('Lade FFmpeg Core Dateien von CDN...');
 
-                const coreURL = '/ffmpeg-core.js';
-                const wasmURL = '/ffmpeg-core.wasm';
-
-                console.log('Core URL:', coreURL);
-                console.log('WASM URL:', wasmURL);
+                // Use CDN for reliable loading in development and production
+                const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
 
                 try {
                     await ffmpeg.load({
-                        coreURL,
-                        wasmURL
+                        coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+                        wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
                     });
                 } catch (err) {
                     console.error('❌ ffmpeg.load() Fehler:', err);
