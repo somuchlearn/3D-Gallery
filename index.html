@@ -297,6 +297,120 @@
         button.showcase-active {
             background: #dc2626 !important;
         }
+
+        /* Video Processing Overlay */
+        .video-processing-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.95);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 10000;
+            backdrop-filter: blur(10px);
+        }
+
+        .video-processing-overlay.active {
+            display: flex;
+        }
+
+        .processing-content {
+            text-align: center;
+            color: white;
+            max-width: 500px;
+            padding: 40px;
+        }
+
+        .processing-icon {
+            font-size: 64px;
+            margin-bottom: 24px;
+            animation: spin 2s linear infinite;
+        }
+
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+
+        .processing-title {
+            font-size: 24px;
+            font-weight: 600;
+            margin-bottom: 12px;
+        }
+
+        .processing-subtitle {
+            font-size: 14px;
+            color: #aaa;
+            margin-bottom: 32px;
+        }
+
+        .progress-container {
+            width: 100%;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+            overflow: hidden;
+            margin-bottom: 16px;
+        }
+
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+            border-radius: 3px;
+            transition: width 0.3s ease;
+            width: 0%;
+        }
+
+        .progress-text {
+            font-size: 14px;
+            color: #999;
+        }
+
+        .processing-steps {
+            margin-top: 24px;
+            text-align: left;
+        }
+
+        .processing-step {
+            display: flex;
+            align-items: center;
+            padding: 8px 0;
+            font-size: 13px;
+            color: #666;
+        }
+
+        .processing-step.active {
+            color: white;
+        }
+
+        .processing-step.completed {
+            color: #10b981;
+        }
+
+        .step-icon {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            border: 2px solid #333;
+            margin-right: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+        }
+
+        .processing-step.active .step-icon {
+            border-color: #3b82f6;
+            background: #3b82f6;
+        }
+
+        .processing-step.completed .step-icon {
+            border-color: #10b981;
+            background: #10b981;
+        }
     </style>
 </head>
 <body>
@@ -408,6 +522,35 @@
             <div class="recording-progress" id="recordingProgress"></div>
         </div>
 
+        <!-- Video Processing Overlay -->
+        <div id="videoProcessingOverlay" class="video-processing-overlay">
+            <div class="processing-content">
+                <div class="processing-icon">🎬</div>
+                <div class="processing-title" id="processingTitle">Video wird erstellt...</div>
+                <div class="processing-subtitle" id="processingSubtitle">Bitte warten Sie einen Moment</div>
+
+                <div class="progress-container">
+                    <div class="progress-bar" id="videoProgressBar"></div>
+                </div>
+                <div class="progress-text" id="videoProgressText">0%</div>
+
+                <div class="processing-steps">
+                    <div class="processing-step" id="step-recording">
+                        <div class="step-icon"></div>
+                        <span>Aufnahme wird erstellt</span>
+                    </div>
+                    <div class="processing-step" id="step-converting">
+                        <div class="step-icon"></div>
+                        <span>Konvertierung zu MP4</span>
+                    </div>
+                    <div class="processing-step" id="step-download">
+                        <div class="step-icon"></div>
+                        <span>Download wird vorbereitet</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <div id="emptyState" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; color: #666; font-size: 16px; pointer-events: none;">
             <div style="font-size: 64px; margin-bottom: 20px; opacity: 0.3;">🖼️</div>
             <div style="font-weight: 600; margin-bottom: 10px;">Kein Bild geladen</div>
@@ -421,6 +564,8 @@
         import * as THREE from 'three';
         import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
         import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
+        import { FFmpeg } from '@ffmpeg/ffmpeg';
+        import { fetchFile, toBlobURL } from '@ffmpeg/util';
 
         let scene, camera, renderer, controls;
         let frameGroup = null;
@@ -445,6 +590,10 @@
         let originalCameraAspect = 0;
         let originalPixelRatio = 0;
 
+        // FFmpeg State
+        let ffmpeg = null;
+        let ffmpegLoaded = false;
+
         // Configuration
         const SHOWCASE_ROTATION_SPEED = 0.898; // rad/sec (~7s für 360°)
         const SHOWCASE_DURATION = Math.PI * 2 / SHOWCASE_ROTATION_SPEED;
@@ -452,6 +601,299 @@
         const RECORDING_HEIGHT = 1080;
         const RECORDING_FPS = 60; // 60 FPS für maximale Flüssigkeit
         const RECORDING_BITRATE = 12000000; // 12 Mbps für beste Qualität
+
+        // FFmpeg Initialisierung
+        async function loadFFmpeg() {
+            if (ffmpegLoaded) {
+                console.log('FFmpeg bereits geladen, überspringe...');
+                return;
+            }
+
+            console.log('Erstelle neue FFmpeg Instanz...');
+            ffmpeg = new FFmpeg();
+
+            ffmpeg.on('log', ({ message }) => {
+                console.log('[FFmpeg Log]', message);
+            });
+
+            ffmpeg.on('progress', ({ progress }) => {
+                const percent = Math.round(progress * 100);
+                console.log(`[FFmpeg Progress] ${percent}%`);
+                updateProgress(50 + percent * 0.4, `Konvertierung läuft... ${percent}%`);
+            });
+
+            try {
+                console.log('Lade FFmpeg Core Dateien lokal aus public/...');
+
+                const coreURL = '/ffmpeg-core.js';
+                const wasmURL = '/ffmpeg-core.wasm';
+
+                console.log('Core URL:', coreURL);
+                console.log('WASM URL:', wasmURL);
+
+                try {
+                    await ffmpeg.load({
+                        coreURL,
+                        wasmURL
+                    });
+                } catch (err) {
+                    console.error('❌ ffmpeg.load() Fehler:', err);
+                    console.error('Error Details:', JSON.stringify(err, Object.getOwnPropertyNames(err)));
+                    throw new Error('ffmpeg.load() fehlgeschlagen: ' + (err.message || err));
+                }
+
+                ffmpegLoaded = true;
+                console.log('✅ FFmpeg erfolgreich geladen!');
+            } catch (error) {
+                console.error('❌ FFmpeg Load Fehler:', error);
+                console.error('Error Type:', typeof error);
+                console.error('Error Stack:', error.stack);
+                throw new Error('FFmpeg konnte nicht geladen werden: ' + (error.message || 'Unbekannter Fehler'));
+            }
+        }
+
+        // Image Enhancement Functions
+        function rgbToHsl(r, g, b) {
+            r /= 255;
+            g /= 255;
+            b /= 255;
+            const max = Math.max(r, g, b);
+            const min = Math.min(r, g, b);
+            let h, s, l = (max + min) / 2;
+
+            if (max === min) {
+                h = s = 0;
+            } else {
+                const d = max - min;
+                s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+                switch (max) {
+                    case r: h = ((g - b) / d + (g < b ? 6 : 0)) / 6; break;
+                    case g: h = ((b - r) / d + 2) / 6; break;
+                    case b: h = ((r - g) / d + 4) / 6; break;
+                }
+            }
+
+            return [h, s, l];
+        }
+
+        function hslToRgb(h, s, l) {
+            let r, g, b;
+
+            if (s === 0) {
+                r = g = b = l;
+            } else {
+                const hue2rgb = (p, q, t) => {
+                    if (t < 0) t += 1;
+                    if (t > 1) t -= 1;
+                    if (t < 1/6) return p + (q - p) * 6 * t;
+                    if (t < 1/2) return q;
+                    if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+                    return p;
+                };
+
+                const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+                const p = 2 * l - q;
+                r = hue2rgb(p, q, h + 1/3);
+                g = hue2rgb(p, q, h);
+                b = hue2rgb(p, q, h - 1/3);
+            }
+
+            return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+        }
+
+        function enhanceImage(img, contrastFactor = 1.4, saturationFactor = 1.3) {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.width;
+            canvas.height = img.height;
+            const ctx = canvas.getContext('2d');
+
+            ctx.drawImage(img, 0, 0);
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const data = imageData.data;
+
+            for (let i = 0; i < data.length; i += 4) {
+                let r = data[i];
+                let g = data[i + 1];
+                let b = data[i + 2];
+
+                // Convert to HSL for saturation adjustment
+                let [h, s, l] = rgbToHsl(r, g, b);
+
+                // Increase saturation
+                s = Math.min(1, s * saturationFactor);
+
+                // Convert back to RGB
+                [r, g, b] = hslToRgb(h, s, l);
+
+                // Apply contrast
+                r = ((r / 255 - 0.5) * contrastFactor + 0.5) * 255;
+                g = ((g / 255 - 0.5) * contrastFactor + 0.5) * 255;
+                b = ((b / 255 - 0.5) * contrastFactor + 0.5) * 255;
+
+                // Clamp values
+                data[i] = Math.max(0, Math.min(255, r));
+                data[i + 1] = Math.max(0, Math.min(255, g));
+                data[i + 2] = Math.max(0, Math.min(255, b));
+            }
+
+            ctx.putImageData(imageData, 0, 0);
+            return canvas;
+        }
+
+        function extractDominantColors(img, numColors = 5) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+
+            // Use smaller size for faster processing
+            const sampleSize = 100;
+            canvas.width = sampleSize;
+            canvas.height = sampleSize;
+
+            ctx.drawImage(img, 0, 0, sampleSize, sampleSize);
+            const imageData = ctx.getImageData(0, 0, sampleSize, sampleSize);
+            const data = imageData.data;
+
+            // Sample every nth pixel for speed
+            const colorMap = {};
+            const step = 4; // Sample every 4th pixel
+
+            for (let i = 0; i < data.length; i += step * 4) {
+                const r = data[i];
+                const g = data[i + 1];
+                const b = data[i + 2];
+                const a = data[i + 3];
+
+                // Skip transparent pixels
+                if (a < 128) continue;
+
+                // Reduce color space to 32 levels per channel for clustering
+                const rBucket = Math.floor(r / 32) * 32;
+                const gBucket = Math.floor(g / 32) * 32;
+                const bBucket = Math.floor(b / 32) * 32;
+
+                const key = `${rBucket},${gBucket},${bBucket}`;
+                colorMap[key] = (colorMap[key] || 0) + 1;
+            }
+
+            // Sort colors by frequency
+            const sortedColors = Object.entries(colorMap)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, numColors)
+                .map(([color]) => {
+                    const [r, g, b] = color.split(',').map(Number);
+                    return { r, g, b };
+                });
+
+            return sortedColors;
+        }
+
+        function adjustColorBrightness(color, amount) {
+            const r = Math.max(0, Math.min(255, color.r + amount));
+            const g = Math.max(0, Math.min(255, color.g + amount));
+            const b = Math.max(0, Math.min(255, color.b + amount));
+            return { r, g, b };
+        }
+
+        function createDynamicBackground(dominantColors) {
+            if (!dominantColors || dominantColors.length === 0) {
+                // Fallback to default gradient
+                const canvas = document.createElement('canvas');
+                canvas.width = 2;
+                canvas.height = 512;
+                const ctx = canvas.getContext('2d');
+                const gradient = ctx.createLinearGradient(0, 0, 0, 512);
+                gradient.addColorStop(0, '#e8e8e8');
+                gradient.addColorStop(1, '#d0d0d0');
+                ctx.fillStyle = gradient;
+                ctx.fillRect(0, 0, 2, 512);
+                return new THREE.CanvasTexture(canvas);
+            }
+
+            const canvas = document.createElement('canvas');
+            canvas.width = 2;
+            canvas.height = 512;
+            const ctx = canvas.getContext('2d');
+
+            // Adjust colors for better background appearance (lighter)
+            const adjustedColors = dominantColors.slice(0, 3).map(color => {
+                // Calculate luminance
+                const luminance = (0.299 * color.r + 0.587 * color.g + 0.114 * color.b) / 255;
+
+                // Make dark colors lighter, light colors slightly darker for balance
+                const adjustment = luminance < 0.4 ? 60 : luminance > 0.7 ? -20 : 20;
+                return adjustColorBrightness(color, adjustment);
+            });
+
+            const gradient = ctx.createLinearGradient(0, 0, 0, 512);
+
+            if (adjustedColors.length === 1) {
+                const c = adjustedColors[0];
+                gradient.addColorStop(0, `rgb(${c.r}, ${c.g}, ${c.b})`);
+                gradient.addColorStop(1, `rgb(${Math.max(0, c.r - 40)}, ${Math.max(0, c.g - 40)}, ${Math.max(0, c.b - 40)})`);
+            } else if (adjustedColors.length === 2) {
+                const c1 = adjustedColors[0];
+                const c2 = adjustedColors[1];
+                gradient.addColorStop(0, `rgb(${c1.r}, ${c1.g}, ${c1.b})`);
+                gradient.addColorStop(1, `rgb(${c2.r}, ${c2.g}, ${c2.b})`);
+            } else {
+                adjustedColors.forEach((color, index) => {
+                    const stop = index / (adjustedColors.length - 1);
+                    gradient.addColorStop(stop, `rgb(${color.r}, ${color.g}, ${color.b})`);
+                });
+            }
+
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, 2, 512);
+
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        // Overlay Helper Functions
+        function showProcessingOverlay() {
+            document.getElementById('videoProcessingOverlay').classList.add('active');
+            document.getElementById('controls').style.display = 'none';
+            document.getElementById('info').style.display = 'none';
+        }
+
+        function hideProcessingOverlay() {
+            document.getElementById('videoProcessingOverlay').classList.remove('active');
+            document.getElementById('controls').style.display = 'block';
+            document.getElementById('info').style.display = 'block';
+            resetProgress();
+        }
+
+        function updateProgress(percent, text) {
+            document.getElementById('videoProgressBar').style.width = `${percent}%`;
+            document.getElementById('videoProgressText').textContent = `${Math.round(percent)}%`;
+            if (text) {
+                document.getElementById('processingSubtitle').textContent = text;
+            }
+        }
+
+        function updateStep(stepId, state) {
+            const step = document.getElementById(`step-${stepId}`);
+            if (!step) return;
+
+            step.classList.remove('active', 'completed');
+            if (state === 'active') {
+                step.classList.add('active');
+                const icon = step.querySelector('.step-icon');
+                icon.innerHTML = '●';
+            } else if (state === 'completed') {
+                step.classList.add('completed');
+                const icon = step.querySelector('.step-icon');
+                icon.innerHTML = '✓';
+            }
+        }
+
+        function resetProgress() {
+            updateProgress(0);
+            ['recording', 'converting', 'download'].forEach(step => {
+                const el = document.getElementById(`step-${step}`);
+                el.classList.remove('active', 'completed');
+                el.querySelector('.step-icon').innerHTML = '';
+            });
+        }
 
         // Easing-Funktion für sanfte Bewegungen
         function easeInOutCubic(t) {
@@ -657,6 +1099,15 @@
             reader.onload = function(e) {
                 const img = new Image();
                 img.onload = function() {
+                    // Extract dominant colors for dynamic background
+                    const dominantColors = extractDominantColors(img, 5);
+                    console.log('Extracted dominant colors:', dominantColors);
+
+                    // Update scene background with dynamic gradient
+                    const backgroundTexture = createDynamicBackground(dominantColors);
+                    scene.background = backgroundTexture;
+
+                    // Create enhanced texture and framed print
                     createTextureFromImage(img);
                     createFramedPrint();
                     document.getElementById('loading').style.display = 'none';
@@ -667,7 +1118,10 @@
         }
 
         function createTextureFromImage(img) {
-            const texture = new THREE.Texture(img);
+            // Enhance the image with increased contrast and saturation
+            const enhancedCanvas = enhanceImage(img, 1.4, 1.3);
+
+            const texture = new THREE.Texture(enhancedCanvas);
             texture.needsUpdate = true;
             texture.colorSpace = THREE.SRGBColorSpace;
             texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
@@ -765,11 +1219,11 @@
                 frameGroup.add(passepartoutMesh);
             }
 
-            // === PRINT (Fine Art Paper with subtle texture) ===
+            // === PRINT (Fine Art Paper with enhanced brilliance) ===
             const printGeometry = new THREE.PlaneGeometry(printWidth, printHeight);
             const printMaterial = new THREE.MeshStandardMaterial({
                 map: currentTexture,
-                roughness: 0.7,
+                roughness: 0.15, // Reduced from 0.7 for glossier, more vibrant appearance
                 metalness: 0.0,
                 side: THREE.FrontSide,
             });
@@ -1081,7 +1535,9 @@
             isShowcaseMode ? stopShowcase() : startShowcase();
         }
 
-        function startRecording() {
+        async function startRecording() {
+            console.log('startRecording() aufgerufen');
+
             if (!frameGroup) {
                 alert('Bitte laden Sie zuerst ein Bild hoch');
                 return;
@@ -1093,117 +1549,170 @@
                 return;
             }
 
-            // Original-Einstellungen speichern
-            originalRendererSize = {
-                width: renderer.domElement.width,
-                height: renderer.domElement.height
-            };
-            originalCameraAspect = camera.aspect;
-            originalPixelRatio = renderer.getPixelRatio();
+            try {
+                console.log('Zeige Processing Overlay...');
+                // Zeige Processing Overlay
+                showProcessingOverlay();
+                updateStep('recording', 'active');
+                updateProgress(0, 'FFmpeg wird geladen...');
+                console.log('Progress auf 0% gesetzt');
 
-            // Performance-Optimierungen für flüssige Aufnahme
-            // Pixel Ratio auf 1 setzen für konsistente Performance
-            renderer.setPixelRatio(1);
-
-            // Zu 1:1 Aspect Ratio wechseln
-            renderer.setSize(RECORDING_WIDTH, RECORDING_HEIGHT);
-            camera.aspect = 1.0;
-            camera.updateProjectionMatrix();
-
-            // Showcase starten
-            if (!isShowcaseMode) {
-                startShowcase();
-            }
-
-            // Kamera-Position für quadratischen Viewport optimieren
-            const recordingSettings = calculateOptimalShowcaseSettings(1.0);
-            showcaseRadius = recordingSettings.radius;
-            showcaseCameraHeight = recordingSettings.height;
-            showcaseTargetZ = recordingSettings.targetZ;
-
-            console.log(`Recording Mode - Optimized Radius: ${showcaseRadius.toFixed(2)}m, Height: ${showcaseCameraHeight.toFixed(2)}m, TargetZ: ${showcaseTargetZ.toFixed(2)}m`);
-
-            // MediaRecorder einrichten
-            const stream = renderer.domElement.captureStream(RECORDING_FPS);
-
-            let options;
-            let mimeType;
-            let fileExtension;
-
-            // Prüfe beste Codec-Unterstützung
-            if (MediaRecorder.isTypeSupported('video/webm; codecs=vp9')) {
-                options = { mimeType: 'video/webm; codecs=vp9', videoBitsPerSecond: RECORDING_BITRATE };
-                mimeType = 'video/webm';
-                fileExtension = 'webm';
-            } else if (MediaRecorder.isTypeSupported('video/webm; codecs=vp8')) {
-                options = { mimeType: 'video/webm; codecs=vp8', videoBitsPerSecond: RECORDING_BITRATE };
-                mimeType = 'video/webm';
-                fileExtension = 'webm';
-            } else if (MediaRecorder.isTypeSupported('video/webm; codecs=h264')) {
-                options = { mimeType: 'video/webm; codecs=h264', videoBitsPerSecond: RECORDING_BITRATE };
-                mimeType = 'video/webm';
-                fileExtension = 'webm';
-            } else {
-                options = { mimeType: 'video/webm', videoBitsPerSecond: RECORDING_BITRATE };
-                mimeType = 'video/webm';
-                fileExtension = 'webm';
-            }
-
-            mediaRecorder = new MediaRecorder(stream, options);
-            recordedChunks = [];
-
-            mediaRecorder.ondataavailable = (event) => {
-                if (event.data.size > 0) {
-                    recordedChunks.push(event.data);
+                // Lade FFmpeg wenn nötig
+                if (!ffmpegLoaded) {
+                    console.log('Lade FFmpeg...');
+                    await loadFFmpeg();
+                    console.log('FFmpeg geladen!');
                 }
-            };
 
-            mediaRecorder.onstop = () => {
-                const blob = new Blob(recordedChunks, { type: mimeType });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = `fine-art-showcase-${Date.now()}.${fileExtension}`;
-                a.click();
-                URL.revokeObjectURL(url);
+                console.log('Bereite Aufnahme vor...');
+                updateProgress(10, 'Aufnahme wird vorbereitet...');
 
-                // Zeige Konvertierungs-Hinweis für MP4
-                const message = `Video erfolgreich gespeichert als .${fileExtension}!\n\n` +
-                    `Für Instagram (MP4): Konvertieren Sie das Video mit:\n` +
-                    `• CloudConvert.com (kostenlos, online)\n` +
-                    `• HandBrake (kostenlos, Desktop)\n` +
-                    `• ffmpeg: ffmpeg -i input.webm output.mp4`;
+                // Original-Einstellungen speichern
+                originalRendererSize = {
+                    width: renderer.domElement.width,
+                    height: renderer.domElement.height
+                };
+                originalCameraAspect = camera.aspect;
+                originalPixelRatio = renderer.getPixelRatio();
 
-                alert(message);
+                // Performance-Optimierungen
+                renderer.setPixelRatio(1);
+                renderer.setSize(RECORDING_WIDTH, RECORDING_HEIGHT);
+                camera.aspect = 1.0;
+                camera.updateProjectionMatrix();
+
+                // Showcase starten (unsichtbar im Hintergrund)
+                if (!isShowcaseMode) {
+                    startShowcase();
+                }
+
+                // Kamera-Position optimieren
+                const recordingSettings = calculateOptimalShowcaseSettings(1.0);
+                showcaseRadius = recordingSettings.radius;
+                showcaseCameraHeight = recordingSettings.height;
+                showcaseTargetZ = recordingSettings.targetZ;
+
+                updateProgress(15, 'Video wird aufgenommen...');
+
+                // MediaRecorder einrichten
+                const stream = renderer.domElement.captureStream(RECORDING_FPS);
+                const options = MediaRecorder.isTypeSupported('video/webm; codecs=vp9')
+                    ? { mimeType: 'video/webm; codecs=vp9', videoBitsPerSecond: RECORDING_BITRATE }
+                    : { mimeType: 'video/webm', videoBitsPerSecond: RECORDING_BITRATE };
+
+                mediaRecorder = new MediaRecorder(stream, options);
                 recordedChunks = [];
-                mediaRecorder = null;
-            };
 
-            mediaRecorder.start();
-            isRecording = true;
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 0) {
+                        recordedChunks.push(event.data);
+                    }
+                };
 
-            // UI Updates
-            document.getElementById('recordingIndicator').style.display = 'block';
-            document.getElementById('recordBtn').textContent = 'AUFNAHME ABBRECHEN';
-            document.getElementById('recordBtn').classList.add('recording');
-            document.getElementById('controls').style.display = 'none';
-            document.getElementById('info').style.display = 'none';
+                mediaRecorder.onstop = async () => {
+                    try {
+                        updateStep('recording', 'completed');
+                        updateStep('converting', 'active');
+                        updateProgress(50, 'Video wird zu MP4 konvertiert...');
 
-            updateRecordingProgress();
+                        // WebM Blob erstellen
+                        const webmBlob = new Blob(recordedChunks, { type: 'video/webm' });
 
-            // Auto-stop nach einer Rotation
-            setTimeout(() => {
-                if (isRecording) {
-                    stopRecording();
-                }
-            }, SHOWCASE_DURATION * 1000 + 500);
+                        // Konvertiere zu MP4
+                        const mp4Blob = await convertWebMToMP4(webmBlob);
+
+                        updateStep('converting', 'completed');
+                        updateStep('download', 'active');
+                        updateProgress(95, 'Download wird vorbereitet...');
+
+                        // MP4 Download
+                        const url = URL.createObjectURL(mp4Blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = `fine-art-showcase-${Date.now()}.mp4`;
+                        a.click();
+                        URL.revokeObjectURL(url);
+
+                        updateStep('download', 'completed');
+                        updateProgress(100, 'Fertig!');
+
+                        // Kurze Pause dann Overlay ausblenden
+                        setTimeout(() => {
+                            hideProcessingOverlay();
+                        }, 1500);
+
+                    } catch (error) {
+                        console.error('Konvertierungs-Fehler:', error);
+                        alert('Fehler bei der MP4-Konvertierung. Bitte versuchen Sie es erneut.');
+                        hideProcessingOverlay();
+                    } finally {
+                        recordedChunks = [];
+                        mediaRecorder = null;
+                    }
+                };
+
+                mediaRecorder.start();
+                isRecording = true;
+
+                // Simuliere Progress während Aufnahme
+                const recordingDuration = SHOWCASE_DURATION * 1000;
+                const progressInterval = setInterval(() => {
+                    if (!isRecording) {
+                        clearInterval(progressInterval);
+                        return;
+                    }
+                    const elapsed = Date.now() - showcaseStartTime;
+                    const progress = Math.min((elapsed / recordingDuration) * 35 + 15, 50);
+                    updateProgress(progress, 'Aufnahme läuft...');
+                }, 100);
+
+                // Auto-stop nach einer Rotation
+                setTimeout(() => {
+                    if (isRecording) {
+                        clearInterval(progressInterval);
+                        stopRecording();
+                    }
+                }, recordingDuration + 500);
+
+            } catch (error) {
+                console.error('Recording-Fehler:', error);
+                console.error('Error Stack:', error.stack);
+                alert('Fehler beim Starten der Aufnahme: ' + error.message);
+                hideProcessingOverlay();
+            }
+        }
+
+        async function convertWebMToMP4(webmBlob) {
+            // WebM in FFmpeg schreiben
+            await ffmpeg.writeFile('input.webm', await fetchFile(webmBlob));
+
+            // Konvertierung zu MP4
+            await ffmpeg.exec([
+                '-i', 'input.webm',
+                '-c:v', 'libx264',
+                '-preset', 'fast',
+                '-crf', '22',
+                '-c:a', 'aac',
+                '-b:a', '128k',
+                '-movflags', '+faststart',
+                'output.mp4'
+            ]);
+
+            // MP4 auslesen
+            const data = await ffmpeg.readFile('output.mp4');
+
+            // Cleanup
+            await ffmpeg.deleteFile('input.webm');
+            await ffmpeg.deleteFile('output.mp4');
+
+            return new Blob([data.buffer], { type: 'video/mp4' });
         }
 
         function stopRecording() {
             if (!isRecording || !mediaRecorder) return;
 
             isRecording = false;
-            mediaRecorder.stop();
+            mediaRecorder.stop(); // Dies triggert mediaRecorder.onstop
             stopShowcase();
 
             // Original-Einstellungen wiederherstellen
@@ -1211,13 +1720,6 @@
             renderer.setSize(originalRendererSize.width, originalRendererSize.height);
             camera.aspect = originalCameraAspect;
             camera.updateProjectionMatrix();
-
-            // UI wiederherstellen
-            document.getElementById('controls').style.display = 'block';
-            document.getElementById('info').style.display = 'block';
-            document.getElementById('recordingIndicator').style.display = 'none';
-            document.getElementById('recordBtn').textContent = 'VIDEO AUFNEHMEN (1:1)';
-            document.getElementById('recordBtn').classList.remove('recording');
         }
 
         function updateRecordingProgress() {
@@ -1264,9 +1766,9 @@
         }
 
         function toggleRecording() {
-            if (isRecording) {
-                cancelRecording();
-            } else {
+            // Da die Aufnahme jetzt mit Overlay läuft, gibt es kein Cancel mehr
+            // Der Button ist während der Verarbeitung automatisch disabled
+            if (!isRecording) {
                 startRecording();
             }
         }
